@@ -10,7 +10,10 @@ ADMIN_ID = 8387873012
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 MAX_ACCOUNTS = 50
 MAX_PER_USER = 5
-DATA_FILE = "/root/.openclaw/workspace/users_data.json"
+DATA_FILE = os.environ.get("DATA_FILE", "users_data.json")
+# Group forwarding: set GROUP_CHAT_ID to forward emails to a Telegram group
+# Leave empty to forward to individual DMs (default)
+GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID", "")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 user_sessions = {}
@@ -83,9 +86,12 @@ class Monitor:
                                         pl = msg.get_payload(decode=True)
                                         if pl: body = pl.decode(errors='ignore')[:2000]
                                     body = re.sub(r'<[^>]+>','',body).strip() or "No text content"
-                                    txt = f"📧 New Email\n\n📬 Account: {addr}\n📍 Subject: {subj}\n👤 From: {sender}\n\n📝 Content:\n{body}\n\n⚡ Received at {datetime.now().strftime('%H:%M:%S')}"
+                                    # Build message — hide email address for privacy
+                                    txt = f"📧 New Email\n\n📍 Subject: {subj}\n👤 From: {sender}\n\n📝 Content:\n{body}\n\n⚡ Received at {datetime.now().strftime('%H:%M:%S')}"
                                     try:
-                                        bot.send_message(uid, txt)
+                                        # Forward to group if configured, otherwise to user DM
+                                        target_chat = int(GROUP_CHAT_ID) if GROUP_CHAT_ID else uid
+                                        bot.send_message(target_chat, txt)
                                         users = load_users()
                                         if str(uid) in users:
                                             for a in users[str(uid)].get("accounts",[]):
