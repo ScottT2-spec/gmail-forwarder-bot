@@ -3,17 +3,20 @@ from email.header import decode_header
 from datetime import datetime
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-print("Starting Gmail Bot V2...", flush=True)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+print("Starting Gmail Bot V3...", flush=True)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID = 8387873012
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "8387873012"))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
-MAX_ACCOUNTS = 50
-MAX_PER_USER = 5
+MAX_ACCOUNTS = 500  # total across all users
+MAX_PER_USER = 50
 DATA_FILE = os.environ.get("DATA_FILE", "users_data.json")
-# Group forwarding: set GROUP_CHAT_ID to forward emails to a Telegram group
-# Leave empty to forward to individual DMs (default)
-GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID", "")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 user_sessions = {}
@@ -32,15 +35,29 @@ def load_users():
     except: pass
     return {}
 
+def get_user_channel(uid):
+    """Get user's configured forwarding channel. Returns None if not set (DM mode)."""
+    users = load_users()
+    u = users.get(str(uid), {})
+    ch = u.get("forward_channel")
+    if ch:
+        try: return int(ch)
+        except: pass
+    return None
+
 def user_menu(uid):
     m = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     users = load_users()
     if str(uid) in users and users[str(uid)].get("accounts"):
         m.add(KeyboardButton("Add Email"), KeyboardButton("My Stats"),
               KeyboardButton("My Accounts"), KeyboardButton("Delete Account"),
-              KeyboardButton("Admin"), KeyboardButton("Refresh"))
+              KeyboardButton("Set Channel"), KeyboardButton("Refresh"))
+        if uid == ADMIN_ID:
+            m.add(KeyboardButton("Admin"))
     else:
-        m.add(KeyboardButton("Add Email"), KeyboardButton("Admin"))
+        m.add(KeyboardButton("Add Email"), KeyboardButton("Set Channel"))
+        if uid == ADMIN_ID:
+            m.add(KeyboardButton("Admin"))
     return m
 
 def admin_menu():
@@ -86,18 +103,21 @@ class Monitor:
                                         pl = msg.get_payload(decode=True)
                                         if pl: body = pl.decode(errors='ignore')[:2000]
                                     body = re.sub(r'<[^>]+>','',body).strip() or "No text content"
-                                    # Build message — hide email address for privacy
                                     txt = f"📧 New Email\n\n📍 Subject: {subj}\n👤 From: {sender}\n\n📝 Content:\n{body}\n\n⚡ Received at {datetime.now().strftime('%H:%M:%S')}"
                                     try:
-                                        # Forward to group if configured, otherwise to user DM
-                                        target_chat = int(GROUP_CHAT_ID) if GROUP_CHAT_ID else uid
+                                        # Forward to user's channel if set, otherwise DM
+                                        target_chat = get_user_channel(uid) or uid
                                         bot.send_message(target_chat, txt)
                                         users = load_users()
                                         if str(uid) in users:
                                             for a in users[str(uid)].get("accounts",[]):
                                                 if a["email"]==addr: a["total_emails"]=a.get("total_emails",0)+1; a["last_email_time"]=datetime.now().isoformat(); break
                                             save_users(users)
-                                    except: pass
+                                    except Exception as send_err:
+                                        print(f"[send error] {uid} -> {send_err}", flush=True)
+                                        # Fallback to DM if channel fails
+                                        try: bot.send_message(uid, txt)
+                                        except: pass
                                     seen.add(eid)
                                     if len(seen)>50: seen=set(list(seen)[-25:])
                     try: m.logout()
@@ -123,6 +143,8 @@ class Monitor:
 
 monitor = Monitor()
 
+# ── Commands ──────────────────────────────────────────────────
+
 @bot.message_handler(commands=['start','help'])
 def cmd_start(message):
     uid = message.from_user.id
@@ -131,9 +153,27 @@ def cmd_start(message):
     users = load_users()
     if str(uid) in users and users[str(uid)].get("accounts"):
         n = len(users[str(uid)]["accounts"])
-        bot.send_message(uid, f"Welcome back {name}!\n\n📧 Accounts: {n}\n🔔 System active", reply_markup=user_menu(uid))
+        ch = users[str(uid)].get("forward_channel")
+        ch_txt = f"\n📢 Channel: {ch}" if ch else "\n📢 Channel: DM (use 'Set Channel' to change)"
+        bot.send_message(uid, f"Welcome back {name}!\n\n📧 Accounts: {n}\n🔔 System active{ch_txt}", reply_markup=user_menu(uid))
     else:
-        bot.send_message(uid, f"Welcome {name}!\n\n📧 Gmail Forwarder V2\nUp to {MAX_PER_USER} accounts per user\n\nTap 'Add Email' to start", reply_markup=user_menu(uid))
+        bot.send_message(uid, f"Welcome {name}!\n\n📧 Gmail Forwarder V3\nUp to {MAX_PER_USER} accounts\n\n📢 Set your channel first, then add emails.\n\nTap 'Set Channel' to start", reply_markup=user_menu(uid))
+
+@bot.message_handler(func=lambda m: m.text == "Set Channel")
+def cmd_set_channel(message):
+    uid = message.from_user.id
+    user_sessions[uid] = {"step": "set_channel"}
+    users = load_users()
+    current = users.get(str(uid), {}).get("forward_channel", "Not set (DMs)")
+    bot.send_message(uid, 
+        f"📢 Current channel: {current}\n\n"
+        "Send me the channel/group ID where you want emails forwarded.\n\n"
+        "How to get it:\n"
+        "1. Add this bot as admin to your channel/group\n"
+        "2. Send a message in the channel\n"
+        "3. Forward that message to @userinfobot to get the ID\n"
+        "4. Send the ID here (starts with -100...)\n\n"
+        "Or send 'dm' to receive emails in this chat.")
 
 @bot.message_handler(func=lambda m: m.text == "Add Email")
 def cmd_add(message):
@@ -153,7 +193,8 @@ def cmd_stats(message):
     accs = u.get("accounts",[])
     total = sum(a.get("total_emails",0) for a in accs)
     active = sum(1 for a in accs if f"{uid}_{a['email']}" in monitor.active)
-    bot.send_message(uid, f"📊 Your Stats\n\n👤 {u.get('name','')}\n📧 Accounts: {len(accs)}/{MAX_PER_USER}\n🔔 Active: {active}\n📨 Total emails: {total}", reply_markup=user_menu(uid))
+    ch = u.get("forward_channel", "DM")
+    bot.send_message(uid, f"📊 Your Stats\n\n👤 {u.get('name','')}\n📧 Accounts: {len(accs)}/{MAX_PER_USER}\n🔔 Active: {active}\n📨 Total emails: {total}\n📢 Channel: {ch}", reply_markup=user_menu(uid))
 
 @bot.message_handler(func=lambda m: m.text == "My Accounts")
 def cmd_accounts(message):
@@ -188,6 +229,8 @@ def cmd_delete(message):
 @bot.message_handler(func=lambda m: m.text == "Admin")
 def cmd_admin(message):
     uid = message.from_user.id
+    if uid != ADMIN_ID:
+        bot.send_message(uid, "⛔ Admin only"); return
     user_sessions[uid] = {"step": "admin_pass"}
     bot.send_message(uid, "👑 Enter admin password:")
 
@@ -212,9 +255,10 @@ def cmd_all_users(message):
         accs = d.get("accounts",[])
         vis = [a for a in accs if not a.get("is_hidden")]
         hid = len(accs) - len(vis)
+        ch = d.get("forward_channel", "DM")
         txt += f"👤 {d.get('name','?')} | ID: {u}\n📧 {len(vis)} visible"
         if hid: txt += f" (+{hid} 🔒)"
-        txt += f" | 📨 {sum(a.get('total_emails',0) for a in accs)}\n\n"
+        txt += f" | 📢 {ch} | 📨 {sum(a.get('total_emails',0) for a in accs)}\n\n"
     bot.send_message(uid, txt, reply_markup=admin_menu())
 
 @bot.message_handler(func=lambda m: m.text == "All Accounts")
@@ -245,7 +289,15 @@ def cmd_sys_stats(message):
     if uid != ADMIN_ID: return
     users = load_users()
     hidden = sum(1 for u in users.values() for a in u.get("accounts",[]) if a.get("is_hidden"))
-    txt = f"📈 System Stats\n\n👥 Users: {len(users)}\n📧 Accounts: {sum(len(u.get('accounts',[])) for u in users.values())}/{MAX_ACCOUNTS}\n🔔 Active monitors: {len(monitor.active)}\n📨 Total emails: {sum(a.get('total_emails',0) for u in users.values() for a in u.get('accounts',[]))}\n🔒 Hidden: {hidden}\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    with_channel = sum(1 for u in users.values() if u.get("forward_channel"))
+    txt = (f"📈 System Stats\n\n"
+           f"👥 Users: {len(users)}\n"
+           f"📧 Accounts: {sum(len(u.get('accounts',[])) for u in users.values())}/{MAX_ACCOUNTS}\n"
+           f"🔔 Active monitors: {len(monitor.active)}\n"
+           f"📨 Total emails: {sum(a.get('total_emails',0) for u in users.values() for a in u.get('accounts',[]))}\n"
+           f"📢 Users with channels: {with_channel}\n"
+           f"🔒 Hidden: {hidden}\n"
+           f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     bot.send_message(uid, txt, reply_markup=admin_menu())
 
 @bot.message_handler(func=lambda m: m.text == "Ban Manager")
@@ -254,6 +306,8 @@ def cmd_ban(message):
     mk = InlineKeyboardMarkup()
     mk.add(InlineKeyboardButton("🚫 Ban User", callback_data="ban"), InlineKeyboardButton("✅ Unban", callback_data="unban"), InlineKeyboardButton("📋 Banned List", callback_data="banned_list"))
     bot.send_message(message.from_user.id, "🚫 Ban Management", reply_markup=mk)
+
+# ── Text handler ──────────────────────────────────────────────
 
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
@@ -266,7 +320,32 @@ def handle_text(message):
     
     s = user_sessions[uid]
     
-    if s.get("step") == "add_email":
+    if s.get("step") == "set_channel":
+        del user_sessions[uid]
+        users = load_users()
+        if str(uid) not in users:
+            users[str(uid)] = {"name": message.from_user.first_name or "", "register_date": datetime.now().isoformat(), "is_banned": False, "accounts": []}
+        
+        if txt.lower() == "dm":
+            users[str(uid)].pop("forward_channel", None)
+            save_users(users)
+            bot.send_message(uid, "✅ Emails will be sent to your DMs", reply_markup=user_menu(uid))
+        else:
+            # Validate channel ID format
+            try:
+                channel_id = int(txt)
+                # Test sending a message to the channel
+                try:
+                    bot.send_message(channel_id, "✅ Gmail Forwarder connected! Emails will appear here.")
+                    users[str(uid)]["forward_channel"] = str(channel_id)
+                    save_users(users)
+                    bot.send_message(uid, f"✅ Channel set to {channel_id}\n\nAll your emails will now forward there.", reply_markup=user_menu(uid))
+                except Exception as e:
+                    bot.send_message(uid, f"❌ Can't send to that channel.\n\nMake sure:\n1. The bot is added as admin\n2. The ID is correct\n\nError: {e}", reply_markup=user_menu(uid))
+            except ValueError:
+                bot.send_message(uid, "❌ Invalid ID. Must be a number (e.g. -1001234567890) or 'dm'", reply_markup=user_menu(uid))
+    
+    elif s.get("step") == "add_email":
         if "@gmail.com" not in txt.lower():
             bot.send_message(uid, "❌ Must be a Gmail address"); return
         user_sessions[uid] = {"step": "add_pass", "email": txt.lower().strip()}
@@ -286,9 +365,11 @@ def handle_text(message):
             users[str(uid)]["accounts"].append({"email":addr,"app_password":pwd,"total_emails":0,"last_email_time":None,"added_date":datetime.now().isoformat(),"is_active":True,"is_hidden":False})
             save_users(users)
             del user_sessions[uid]
+            ch = get_user_channel(uid)
+            ch_txt = f"📢 Forwarding to: {ch}" if ch else "📢 Forwarding to: your DMs"
             mk = InlineKeyboardMarkup()
             mk.add(InlineKeyboardButton("🔒 Hide from admin", callback_data=f"hide_{addr}"), InlineKeyboardButton("👁 Visible", callback_data=f"vis_{addr}"))
-            bot.send_message(uid, f"🎉 Added {addr}!\n\n⚡ Monitoring active now\n\n🔐 Privacy:", reply_markup=mk)
+            bot.send_message(uid, f"🎉 Added {addr}!\n\n⚡ Monitoring active\n{ch_txt}\n\n🔐 Privacy:", reply_markup=mk)
             monitor.start(uid, addr, pwd)
         except Exception as e:
             print(f"Login failed: {e}", flush=True)
@@ -332,6 +413,8 @@ def handle_text(message):
             bot.send_message(uid, f"✅ Unbanned {txt}", reply_markup=admin_menu())
         else: bot.send_message(uid, "❌ User not found", reply_markup=admin_menu())
         user_sessions.pop(uid, None)
+
+# ── Callbacks ─────────────────────────────────────────────────
 
 @bot.callback_query_handler(func=lambda c: True)
 def callbacks(call):
@@ -388,7 +471,7 @@ def callbacks(call):
     elif d == "banned_list":
         if uid != ADMIN_ID: return
         users = load_users()
-        banned = {u:d for u,d in users.items() if d.get("is_banned")}
+        banned = {u:dd for u,dd in users.items() if dd.get("is_banned")}
         if not banned: bot.send_message(uid, "No banned users", reply_markup=admin_menu())
         else:
             txt = "🚫 Banned Users\n\n"
@@ -401,6 +484,8 @@ def callbacks(call):
     
     try: bot.answer_callback_query(call.id)
     except: pass
+
+# ── Init & Run ────────────────────────────────────────────────
 
 def init():
     users = load_users()
@@ -415,7 +500,7 @@ if __name__ == "__main__":
     init()
     bot.remove_webhook()
     time.sleep(1)
-    print("Bot V2 running!", flush=True)
+    print("Bot V3 running!", flush=True)
     while True:
         try:
             bot.polling(none_stop=True, interval=1, timeout=30)
