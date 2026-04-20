@@ -1,7 +1,9 @@
-import telebot, imaplib, email as emaillib, threading, time, json, os, re
+import telebot, imaplib, email as emaillib, threading, time, json, os, re, smtplib, html as htmlmod
 from email.header import decode_header
+from email.mime.text import MIMEText
 from datetime import datetime
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+import urllib.request, urllib.error
 
 try:
     from dotenv import load_dotenv
@@ -18,8 +20,34 @@ MAX_ACCOUNTS = 500  # total across all users
 MAX_PER_USER = 50
 DATA_FILE = os.environ.get("DATA_FILE", "users_data.json")
 
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+
 bot = telebot.TeleBot(BOT_TOKEN)
 user_sessions = {}
+# Store email data for replies: {message_id: {sender, subject, account_email, account_pwd, uid}}
+email_cache = {}
+
+def ai_summary(subject, sender, body):
+    """Generate a one-line AI summary of an email using Groq."""
+    if not GROQ_API_KEY:
+        return None
+    try:
+        prompt = f"Summarize this email in one short sentence (max 15 words). Just the summary, nothing else.\n\nFrom: {sender}\nSubject: {subject}\nBody: {body[:500]}"
+        payload = json.dumps({
+            "model": "llama-3.1-8b-instant",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 50,
+            "temperature": 0.3
+        }).encode()
+        req = urllib.request.Request("https://api.groq.com/openai/v1/chat/completions",
+            data=payload,
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+            return result["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"[ai_summary error] {e}", flush=True)
+        return None
 
 def save_users(data):
     try:
@@ -111,23 +139,45 @@ class Monitor:
                                     body = re.sub(r'-{3,}', '', body)  # remove separator lines
                                     body = re.sub(r'\n{3,}', '\n\n', body)  # collapse excessive newlines
                                     body = body.strip() or "No text content"
+                                    # AI summary
+                                    summary = ai_summary(subj, sender, body)
+                                    summary_line = f"\n🤖 <b>{htmlmod.escape(summary)}</b>\n" if summary else ""
                                     # Convert markdown-style formatting to HTML
-                                    import html as htmlmod
                                     safe_subj = htmlmod.escape(subj)
                                     safe_sender = htmlmod.escape(sender)
-                                    # Escape HTML in body first, then convert *bold* and _italic_
                                     body_html = htmlmod.escape(body)
                                     body_html = re.sub(r'\*([^*]+)\*', r'<b>\1</b>', body_html)
                                     body_html = re.sub(r'(?<!\w)_([^_]+)_(?!\w)', r'<i>\1</i>', body_html)
-                                    txt = f"📧 New Email\n\n📍 Subject: {safe_subj}\n👤 From: {safe_sender}\n\n📝 Content:\n{body_html}\n\n⚡ Received at {datetime.now().strftime('%H:%M:%S')}"
+                                    txt = f"📧 New Email{summary_line}\n📍 Subject: {safe_subj}\n👤 From: {safe_sender}\n\n📝 Content:\n{body_html}\n\n⚡ Received at {datetime.now().strftime('%H:%M:%S')}"
+                                    # Extract reply-to address
+                                    reply_to_addr = msg.get("reply-to", sender)
+                                    # Clean sender email for reply
+                                    sender_email_match = re.search(r'[\w.-]+@[\w.-]+', reply_to_addr)
+                                    reply_email = sender_email_match.group() if sender_email_match else ""
+                                    # Create reply button
+                                    reply_mk = InlineKeyboardMarkup()
+                                    cache_key = f"{uid}_{int(time.time()*1000)}"
+                                    reply_mk.add(InlineKeyboardButton("↩️ Reply", callback_data=f"reply_{cache_key}"))
                                     try:
                                         # Forward to user's channel if set, otherwise DM
                                         target_chat = get_user_channel(uid) or uid
                                         try:
-                                            bot.send_message(target_chat, txt, parse_mode="HTML")
+                                            sent_msg = bot.send_message(target_chat, txt, parse_mode="HTML", reply_markup=reply_mk)
                                         except:
-                                            # Fallback to plain text if HTML parsing fails
-                                            bot.send_message(target_chat, txt.replace('<b>','').replace('</b>','').replace('<i>','').replace('</i>',''))
+                                            sent_msg = bot.send_message(target_chat, txt.replace('<b>','').replace('</b>','').replace('<i>','').replace('</i>',''), reply_markup=reply_mk)
+                                        # Cache email data for reply
+                                        email_cache[cache_key] = {
+                                            "reply_to": reply_email,
+                                            "subject": subj,
+                                            "account_email": addr,
+                                            "account_pwd": pwd,
+                                            "uid": uid,
+                                            "timestamp": time.time()
+                                        }
+                                        # Keep cache from growing too large
+                                        if len(email_cache) > 200:
+                                            oldest = sorted(email_cache, key=lambda k: email_cache[k]["timestamp"])[:100]
+                                            for k in oldest: email_cache.pop(k, None)
                                         users = load_users()
                                         if str(uid) in users:
                                             for a in users[str(uid)].get("accounts",[]):
@@ -415,6 +465,27 @@ def handle_text(message):
         user_sessions.pop(uid, None)
         bot.send_message(uid, f"✅ Sent to {sent} users", reply_markup=admin_menu())
     
+    elif s.get("step") == "email_reply":
+        cache_key = s.get("cache_key")
+        if cache_key and cache_key in email_cache:
+            ec = email_cache[cache_key]
+            try:
+                reply_msg = MIMEText(txt)
+                reply_msg["Subject"] = f"Re: {ec['subject']}"
+                reply_msg["From"] = ec["account_email"]
+                reply_msg["To"] = ec["reply_to"]
+                with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
+                    smtp.starttls()
+                    smtp.login(ec["account_email"], ec["account_pwd"])
+                    smtp.send_message(reply_msg)
+                bot.send_message(uid, f"✅ Reply sent to {ec['reply_to']}", reply_markup=user_menu(uid))
+            except Exception as e:
+                bot.send_message(uid, f"❌ Failed to send reply: {e}", reply_markup=user_menu(uid))
+        else:
+            bot.send_message(uid, "⏰ Email expired, can't reply", reply_markup=user_menu(uid))
+        user_sessions.pop(uid, None)
+        return
+    
     elif s.get("step") == "ban_input":
         users = load_users()
         if txt in users:
@@ -498,6 +569,20 @@ def callbacks(call):
             for u,dd in banned.items():
                 txt += f"ID: {u} | {dd.get('name','?')} | {len(dd.get('accounts',[]))} accounts\n"
             bot.send_message(uid, txt, reply_markup=admin_menu())
+    
+    elif d.startswith("reply_"):
+        cache_key = d[6:]
+        if cache_key in email_cache:
+            ec = email_cache[cache_key]
+            if ec["uid"] == uid or target_chat == get_user_channel(uid):
+                user_sessions[uid] = {"step": "email_reply", "cache_key": cache_key}
+                bot.send_message(uid, f"↩️ Replying to: {ec['reply_to']}\n📍 Re: {ec['subject']}\n\nType your reply:")
+            else:
+                bot.answer_callback_query(call.id, "⛔ Not your email")
+                return
+        else:
+            bot.answer_callback_query(call.id, "⏰ Email too old to reply")
+            return
     
     elif d == "cancel":
         bot.send_message(uid, "Cancelled", reply_markup=user_menu(uid))
