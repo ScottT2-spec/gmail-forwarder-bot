@@ -441,13 +441,37 @@ def register_handlers(bot, monitor):
             if cache_key in email_cache:
                 ec = email_cache[cache_key]
                 full_txt = format_full_view(ec["subject"], ec["sender"], ec["body"], ec.get("summary"))
-                # Add reply button to full view too
                 mk = InlineKeyboardMarkup()
+                mk.add(InlineKeyboardButton("🔼 Show Less", callback_data=f"less_{cache_key}"))
                 mk.add(InlineKeyboardButton("↩️ Reply", callback_data=f"reply_{cache_key}"))
                 try:
-                    bot.send_message(call.message.chat.id, full_txt, parse_mode="HTML", reply_markup=mk)
+                    bot.edit_message_text(full_txt, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML", reply_markup=mk)
                 except:
-                    bot.send_message(call.message.chat.id, strip_html_tags(full_txt), reply_markup=mk)
+                    try:
+                        bot.edit_message_text(strip_html_tags(full_txt), chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=mk)
+                    except:
+                        pass
+            else:
+                bot.answer_callback_query(call.id, "⏰ Email too old")
+                return
+
+        elif d.startswith("less_"):
+            cache_key = d[5:]
+            if cache_key in email_cache:
+                ec = email_cache[cache_key]
+                from mailer import format_html
+                summary_txt = format_html(ec["subject"], ec["sender"], ec["body"], ec.get("summary"))
+                mk = InlineKeyboardMarkup()
+                if ec.get("summary"):
+                    mk.add(InlineKeyboardButton("📖 Read Full", callback_data=f"full_{cache_key}"))
+                mk.add(InlineKeyboardButton("↩️ Reply", callback_data=f"reply_{cache_key}"))
+                try:
+                    bot.edit_message_text(summary_txt, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML", reply_markup=mk)
+                except:
+                    try:
+                        bot.edit_message_text(strip_html_tags(summary_txt), chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=mk)
+                    except:
+                        pass
             else:
                 bot.answer_callback_query(call.id, "⏰ Email too old")
                 return
