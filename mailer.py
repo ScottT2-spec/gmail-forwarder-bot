@@ -66,9 +66,11 @@ def parse_email(raw_bytes):
 
 def _html_to_text(html_str):
     """Convert HTML email to readable plain text."""
-    # Remove style and script blocks entirely
+    # Remove style and script blocks entirely (multiple patterns for robustness)
     text = re.sub(r'<style[^>]*>.*?</style>', '', html_str, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # Remove any remaining CSS blocks (e.g. in <head> or inline)
+    text = re.sub(r'<head[^>]*>.*?</head>', '', text, flags=re.DOTALL | re.IGNORECASE)
     # Replace <br> and block elements with newlines
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
     text = re.sub(r'</(p|div|tr|li|h[1-6])>', '\n', text, flags=re.IGNORECASE)
@@ -76,6 +78,12 @@ def _html_to_text(html_str):
     text = re.sub(r'<[^>]+>', '', text)
     # Decode HTML entities
     text = htmlmod.unescape(text)
+    # Remove any CSS that leaked through (lines with { } selectors)
+    text = re.sub(r'[^\n]*\{[^}]*\}', '', text)
+    # Remove CSS-like lines (properties like "color:", "font-size:", etc.)
+    text = re.sub(r'^\s*[\w-]+:\s*[^;\n]+;?\s*$', '', text, flags=re.MULTILINE)
+    # Remove stray CSS selectors (lines starting with . or # or *)
+    text = re.sub(r'^\s*[.*#][\w\s,>+~:-]*\{?\s*$', '', text, flags=re.MULTILINE)
     # Clean up whitespace
     text = re.sub(r'[ \t]+', ' ', text)           # collapse spaces
     text = re.sub(r'\n[ \t]+', '\n', text)         # strip leading spaces on lines
