@@ -90,8 +90,10 @@ class Monitor:
                                 s2, md = m.fetch(eid, "(RFC822)")
                                 if s2 == "OK" and md and md[0] and isinstance(md[0], tuple):
                                     msg = emaillib.message_from_bytes(md[0][1])
-                                    subj = str(decode_header(msg.get("subject",""))[0][0] or "")
-                                    if isinstance(subj, bytes): subj = subj.decode(errors='ignore')
+                                    raw_subj = decode_header(msg.get("subject",""))[0]
+                                    subj = raw_subj[0] or ""
+                                    if isinstance(subj, bytes): subj = subj.decode(raw_subj[1] or 'utf-8', errors='ignore')
+                                    subj = str(subj)
                                     sender = msg.get("from","")
                                     body = ""
                                     if msg.is_multipart():
@@ -102,12 +104,30 @@ class Monitor:
                                     else:
                                         pl = msg.get_payload(decode=True)
                                         if pl: body = pl.decode(errors='ignore')[:2000]
-                                    body = re.sub(r'<[^>]+>','',body).strip() or "No text content"
-                                    txt = f"📧 New Email\n\n📍 Subject: {subj}\n👤 From: {sender}\n\n📝 Content:\n{body}\n\n⚡ Received at {datetime.now().strftime('%H:%M:%S')}"
+                                    body = re.sub(r'<[^>]+>','',body)  # strip HTML tags
+                                    body = re.sub(r'View image: \([^)]+\)', '', body)  # remove "View image: (url)"
+                                    body = re.sub(r'Caption:\s*', '', body)  # remove empty captions
+                                    body = re.sub(r'https?://\S+', '', body)  # remove bare URLs
+                                    body = re.sub(r'-{3,}', '', body)  # remove separator lines
+                                    body = re.sub(r'\n{3,}', '\n\n', body)  # collapse excessive newlines
+                                    body = body.strip() or "No text content"
+                                    # Convert markdown-style formatting to HTML
+                                    import html as htmlmod
+                                    safe_subj = htmlmod.escape(subj)
+                                    safe_sender = htmlmod.escape(sender)
+                                    # Escape HTML in body first, then convert *bold* and _italic_
+                                    body_html = htmlmod.escape(body)
+                                    body_html = re.sub(r'\*([^*]+)\*', r'<b>\1</b>', body_html)
+                                    body_html = re.sub(r'(?<!\w)_([^_]+)_(?!\w)', r'<i>\1</i>', body_html)
+                                    txt = f"📧 New Email\n\n📍 Subject: {safe_subj}\n👤 From: {safe_sender}\n\n📝 Content:\n{body_html}\n\n⚡ Received at {datetime.now().strftime('%H:%M:%S')}"
                                     try:
                                         # Forward to user's channel if set, otherwise DM
                                         target_chat = get_user_channel(uid) or uid
-                                        bot.send_message(target_chat, txt)
+                                        try:
+                                            bot.send_message(target_chat, txt, parse_mode="HTML")
+                                        except:
+                                            # Fallback to plain text if HTML parsing fails
+                                            bot.send_message(target_chat, txt.replace('<b>','').replace('</b>','').replace('<i>','').replace('</i>',''))
                                         users = load_users()
                                         if str(uid) in users:
                                             for a in users[str(uid)].get("accounts",[]):
