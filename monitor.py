@@ -91,9 +91,11 @@ class Monitor:
         # Format message
         txt = format_html(subj, sender, body, summary)
 
-        # Reply button
+        # Buttons
         cache_key = f"{uid}_{int(time.time() * 1000)}"
         reply_mk = InlineKeyboardMarkup()
+        if summary:
+            reply_mk.add(InlineKeyboardButton("📖 Read Full", callback_data=f"full_{cache_key}"))
         reply_mk.add(InlineKeyboardButton("↩️ Reply", callback_data=f"reply_{cache_key}"))
 
         # Send
@@ -104,10 +106,13 @@ class Monitor:
             except:
                 self.bot.send_message(target_chat, strip_html_tags(txt), reply_markup=reply_mk)
 
-            # Cache for reply
+            # Cache for reply + read full
             email_cache[cache_key] = {
                 "reply_to": reply_email,
                 "subject": subj,
+                "sender": sender,
+                "body": body,
+                "summary": summary,
                 "account_email": addr,
                 "account_pwd": pwd,
                 "uid": uid,

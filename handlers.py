@@ -7,7 +7,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from config import ADMIN_ID, ADMIN_PASSWORD, MAX_PER_USER, MAX_ACCOUNTS, IMAP_HOST
 from storage import load_users, save_users, get_user_channel, create_user
 from menus import user_menu, admin_menu
-from mailer import send_reply
+from mailer import send_reply, format_full_view, strip_html_tags
 from monitor import email_cache
 
 
@@ -435,6 +435,22 @@ def register_handlers(bot, monitor):
                 for u, dd in banned.items():
                     txt += f"ID: {u} | {dd.get('name', '?')} | {len(dd.get('accounts', []))} accounts\n"
                 bot.send_message(uid, txt, reply_markup=admin_menu())
+
+        elif d.startswith("full_"):
+            cache_key = d[5:]
+            if cache_key in email_cache:
+                ec = email_cache[cache_key]
+                full_txt = format_full_view(ec["subject"], ec["sender"], ec["body"], ec.get("summary"))
+                # Add reply button to full view too
+                mk = InlineKeyboardMarkup()
+                mk.add(InlineKeyboardButton("↩️ Reply", callback_data=f"reply_{cache_key}"))
+                try:
+                    bot.send_message(call.message.chat.id, full_txt, parse_mode="HTML", reply_markup=mk)
+                except:
+                    bot.send_message(call.message.chat.id, strip_html_tags(full_txt), reply_markup=mk)
+            else:
+                bot.answer_callback_query(call.id, "⏰ Email too old")
+                return
 
         elif d.startswith("reply_"):
             cache_key = d[6:]
